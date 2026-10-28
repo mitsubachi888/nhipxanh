@@ -1,0 +1,91 @@
+rules_version = '2';
+// Luật bảo mật cho Nhịp Xanh (bản chạy thử).
+// Chủ club chỉ đọc/sửa club của mình. Hội viên chỉ đọc hồ sơ của mình
+// và chỉ được sửa thói quen, điểm danh (phải đúng mã hôm nay), yêu cầu xóa dữ liệu.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isPasswordUser() { return signedIn() && request.auth.token.firebase.sign_in_provider == 'password'; }
+    function isOwner(c) { return signedIn() && get(/databases/$(database)/documents/clubs/$(c)).data.ownerUid == request.auth.uid; }
+    function myUserPath() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function boundTo(c, u) {
+      return u.role == 'member' && u.clubId == c
+        && get(/databases/$(database)/documents/clubs/$(c)/members/$(u.memberId)).data.uid == request.auth.uid;
+    }
+    function isMemberOf(c) { return signedIn() && exists(myUserPath()) && boundTo(c, get(myUserPath()).data); }
+
+    // Nhận lời mời: chỉ gắn được vào hồ sơ CHƯA gắn máy nào, đúng mã hiện tại, còn hạn.
+    function isClaim(c, m) {
+      let inv = get(/databases/$(database)/documents/invites/$(resource.data.inviteToken));
+      return signedIn()
+        && resource.data.uid == null
+        && resource.data.inviteToken is string
+        && request.resource.data.inviteToken == resource.data.inviteToken
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['uid', 'status', 'consent'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'active'
+        && inv.data.clubId == c
+        && inv.data.memberId == m
+        && request.time < inv.data.expiresAt;
+    }
+
+    // Điểm danh: chỉ thêm đúng ngày hôm nay của club, giữ nguyên các ngày cũ, và phải đúng mã.
+    function validCheckin(c) {
+      let day = get(/databases/$(database)/documents/clubs/$(c)/private/day).data;
+      return resource.data.att.toSet().difference(request.resource.data.att.toSet()).size() == 0
+        && request.resource.data.att.toSet().difference(resource.data.att.toSet()).hasOnly([day.date])
+        && request.resource.data.att.size() == resource.data.att.size() + 1
+        && request.resource.data.checkin == day.code;
+    }
+
+    // Hội viên tự sửa hồ sơ của mình: chỉ thói quen (mỗi lần 1 ngày), điểm danh (đúng mã), yêu cầu xóa.
+    function isMemberEdit(c) {
+      let d = request.resource.data.diff(resource.data).affectedKeys();
+      return signedIn() && resource.data.uid == request.auth.uid
+        && d.hasOnly(['habits', 'att', 'deleteRequested', 'checkin'])
+        && (!d.hasAny(['att']) || validCheckin(c))
+        && (!d.hasAny(['habits']) || (
+              request.resource.data.habits.diff(resource.data.habits).affectedKeys().size() <= 1
+              && request.resource.data.habits.size() <= 400))
+        && (!d.hasAny(['deleteRequested']) || request.resource.data.deleteRequested == true);
+    }
+
+    match /users/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow create, update: if signedIn() && request.auth.uid == uid && (
+        (request.resource.data.role == 'owner' && isPasswordUser()
+          && getAfter(/databases/$(database)/documents/clubs/$(request.resource.data.clubId)).data.ownerUid == uid)
+        || (request.resource.data.role == 'member'
+          && getAfter(/databases/$(database)/documents/clubs/$(request.resource.data.clubId)/members/$(request.resource.data.memberId)).data.uid == uid));
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /clubs/{c} {
+      allow create: if isPasswordUser() && request.resource.data.ownerUid == request.auth.uid;
+      allow get: if isOwner(c) || isMemberOf(c);
+      allow update: if isOwner(c) && request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if isOwner(c);
+
+      // Mã điểm danh hôm nay: chỉ chủ club đọc được.
+      match /private/{d} {
+        allow read, write: if isOwner(c);
+      }
+
+      match /members/{m} {
+        allow list: if isOwner(c);
+        allow get: if isOwner(c) || (signedIn() && resource.data.uid == request.auth.uid);
+        allow create, delete: if isOwner(c);
+        allow update: if isOwner(c) || isMemberEdit(c) || isClaim(c, m);
+      }
+    }
+
+    match /invites/{token} {
+      allow get: if signedIn();
+      allow create: if isOwner(request.resource.data.clubId);
+      // Chủ club xóa, hoặc hội viên xóa ngay sau khi đã dùng mã (mã chỉ dùng 1 lần).
+      allow delete: if isOwner(resource.data.clubId)
+        || (signedIn() && getAfter(/databases/$(database)/documents/clubs/$(resource.data.clubId)/members/$(resource.data.memberId)).data.uid == request.auth.uid);
+    }
+  }
+}

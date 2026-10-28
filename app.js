@@ -17,7 +17,8 @@ async function makeFirebase(){
   const [A,Au,F]=await Promise.all([import(`${base}/firebase-app.js`),import(`${base}/firebase-auth.js`),import(`${base}/firebase-firestore.js`)]);
   const app=A.initializeApp(firebaseConfig);
   const auth=Au.getAuth(app);
-  let db;try{db=F.initializeFirestore(app,{localCache:F.persistentLocalCache({tabManager:F.persistentMultipleTabManager()})})}catch(_){db=F.getFirestore(app)}
+  // Memory cache: persistent IndexedDB cache is unreliable on iPhone Safari and with anonymous sign-in switches.
+  let db;try{db=F.initializeFirestore(app,{localCache:F.memoryLocalCache()})}catch(_){db=F.getFirestore(app)}
   const conv=patch=>{const o={};for(const k in patch){const v=patch[k];
     if(v&&typeof v==='object'&&v[UNION]!==undefined)o[k]=F.arrayUnion(v[UNION]);
     else if(v&&typeof v==='object'&&v[REMOVE]!==undefined)o[k]=F.arrayRemove(v[REMOVE]);
@@ -640,7 +641,8 @@ const authErr=e=>{const c=(e&&(e.code||e.message))||'';
   if(/network/.test(c))return 'Không có mạng. Kiểm tra kết nối rồi thử lại.';
   if(/operation-not-allowed|admin-restricted/.test(c))return 'Chưa bật cách đăng nhập này trong Firebase (xem hướng dẫn cài đặt).';
   if(/permission/.test(c))return 'Mã đã hết hạn hoặc không đúng. Xin chủ club gửi mã mới.';
-  return 'Có lỗi xảy ra. Thử lại sau.'};
+  const d=String((e&&(e.code||e.message))||'').replace(/^FirebaseError:\s*/,'').slice(0,80);
+  return 'Có lỗi xảy ra. Thử lại sau.'+(d?' (Mã lỗi: '+d+')':'')};
 function renderAuthMsg(t){authStep={s:'welcome',err:t};render()}
 function renderAuth(){
   const a=$('#auth');a.hidden=false;document.body.classList.remove('big');
@@ -742,7 +744,10 @@ document.addEventListener('click',async e=>{
     case 'a-inv3':{if(!$('#cs1').checked){$('#a-err').textContent='Cần tích vào ô đồng ý để tiếp tục.';break}
       b.disabled=true;const inv=authStep.inv;
       try{await B.claim({clubId:inv.clubId,memberId:inv.memberId},authStep.code,{date:TODAY,at:Date.now(),version:CONSENT_VER,server:'firebase-singapore'});authStep.s='inv3';render()}
-      catch(err){console.error(err);b.disabled=false;$('#a-err').textContent=authErr(err)}break}
+      catch(err){console.error(err);
+        // The server may have accepted the claim even if the client reported an error: check before showing it.
+        try{const uid=await B.signInAnon(),u=await B.getUser(uid);if(u&&u.memberId===inv.memberId){authStep.s='inv3';render();break}}catch(_){}
+        b.disabled=false;$('#a-err').textContent=authErr(err)}break}
     case 'a-done':{const inv=authStep.inv,uid=await B.signInAnon(),u=await B.getUser(uid).catch(()=>null);authStep={s:'welcome'};SES={...(u||{role:'member',clubId:inv.clubId,memberId:inv.memberId}),uid};startSession();render();break}
     case 'authback':authStep={s:'welcome'};render();break;
     case 'o-login':{const em=$('#o-email').value.trim(),pw=$('#o-pass').value;if(!em||!pw){$('#o-err').textContent='Nhập email và mật khẩu.';break}
